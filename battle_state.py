@@ -99,6 +99,8 @@ class BattleState:
             "playerStatused": False,
             "playerWokeUp": False,
             "playerSnappedOut": False,
+            "playerMoveUsed": "",
+            "playerFainted": False,
             "enemyDamage": 0,
             "enemyCrit": 0,
             "enemyMoveMiss": 0,
@@ -107,7 +109,9 @@ class BattleState:
             "enemyHitConfuse": False,
             "enemyStatused": False,
             "enemyWokeUp": False,
-            "enemySnappedOut": False
+            "enemySnappedOut": False,
+            "enemyMoveUsed": "",
+            "enemyFainted": False
         }
         
         # HP tracking
@@ -149,27 +153,6 @@ class BattleState:
             "speed": 0,
             "special": 0
         }
-        
-    def reset_turn_variables(self):
-        """Reset per-turn battle state variables"""
-        self.state['playerCrit'] = 0
-        self.state['playerMoveMiss'] = 0
-        self.state['playerFullyParalyzed'] = False
-        self.state['playerHitConfuse'] = False
-        self.state['playerStatused'] = False
-        self.state['playerDamage'] = 0
-        self.state['playerStatDownEffect'] = False
-        
-        self.state['enemyCrit'] = 0
-        self.state['enemyMoveMiss'] = 0
-        self.state['enemyFullyParalyzed'] = False
-        self.state['enemyHitConfuse'] = False
-        self.state['enemyStatused'] = False
-        self.state['enemyDamage'] = 0
-        self.state['enemyStatDownEffect'] = False
-        
-        self.state['flinched'] = False
-        self.turn_moves = []
         
     def update_enemy_pokemon(self, name, current_hp=None, max_hp=None, level=100):
         """Update enemy Pokemon data when it switches in"""
@@ -285,6 +268,7 @@ Player First: {self.state['playerFirst']}
 Flinched: {self.state['flinched']}
 
 PLAYER:
+Move Used: {self.state['playerMoveUsed']}
 Damage: {self.state['playerDamage']} (dealt to enemy)
 Crit: {self.state['playerCrit']} (scored by player)
 Move Miss: {self.state['playerMoveMiss']}
@@ -294,8 +278,10 @@ Hit by Confusion: {self.state['playerHitConfuse']}
 Statused: {self.state['playerStatused']} (inflicted status on enemy)
 Woke Up: {self.state['playerWokeUp']}
 Snapped Out: {self.state['playerSnappedOut']}
+Fainted: {self.state['playerFainted']}
 
 ENEMY:
+Move Used: {self.state['enemyMoveUsed']}
 Damage: {self.state['enemyDamage']} (dealt to player)
 Crit: {self.state['enemyCrit']} (scored by enemy)
 Move Miss: {self.state['enemyMoveMiss']}
@@ -304,6 +290,7 @@ Fully Paralyzed: {self.state['enemyFullyParalyzed']}
 Hit by Confusion: {self.state['enemyHitConfuse']}
 Statused: {self.state['enemyStatused']} (inflicted status on player)
 Woke Up: {self.state['enemyWokeUp']}
-Snapped Out: {self.state['enemySnappedOut']}"""
+Snapped Out: {self.state['enemySnappedOut']}
+Fainted: {self.state['enemyFainted']}"""
         
         return pokemon_info

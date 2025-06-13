@@ -51,8 +51,8 @@ class BattleParser:
             elif '|-end|' in line and 'confusion' in line:
                 self._parse_confusion_end(line)
                 
-            # Stat changes
-            elif '|-unboost|' in line:
+            # Stat changes (both decreases and increases)
+            elif '|-unboost|' in line or '|-boost|' in line:
                 self._parse_stat_change(line)
                 
             # Turn tracking
@@ -67,6 +67,10 @@ class BattleParser:
             elif '|request|' in line:
                 self._parse_request(line)
                 
+            # Faint detection
+            elif '|faint|' in line:
+                self._parse_faint(line)
+                
         except Exception as e:
             self.log(f"Error parsing battle data: {str(e)}", "ERROR")
             
@@ -77,10 +81,37 @@ class BattleParser:
             player = parts[2]
             move = parts[3] if len(parts) > 3 else "unknown"
             
+            # Initialize turn_moves if this is the first move of a new turn
+            if not hasattr(self.battle_state, 'turn_moves'):
+                self.battle_state.turn_moves = []
+            
             self.battle_state.turn_moves.append(player)
             
-            # If this is the first move of the turn, they won speed
+            # If this is the first move of the turn, reset turn-specific values and determine speed
             if len(self.battle_state.turn_moves) == 1:
+                # Reset all turn-specific battle state values at start of new turn
+                self.battle_state.state['playerCrit'] = 0
+                self.battle_state.state['playerMoveMiss'] = 0
+                self.battle_state.state['playerFullyParalyzed'] = False
+                self.battle_state.state['playerHitConfuse'] = False
+                self.battle_state.state['playerStatused'] = False
+                self.battle_state.state['playerDamage'] = 0
+                self.battle_state.state['playerStatDownEffect'] = False
+                self.battle_state.state['playerMoveUsed'] = ""
+                self.battle_state.state['playerFainted'] = False
+                
+                self.battle_state.state['enemyCrit'] = 0
+                self.battle_state.state['enemyMoveMiss'] = 0
+                self.battle_state.state['enemyFullyParalyzed'] = False
+                self.battle_state.state['enemyHitConfuse'] = False
+                self.battle_state.state['enemyStatused'] = False
+                self.battle_state.state['enemyDamage'] = 0
+                self.battle_state.state['enemyStatDownEffect'] = False
+                self.battle_state.state['enemyMoveUsed'] = ""
+                self.battle_state.state['enemyFainted'] = False
+                
+                self.battle_state.state['flinched'] = False
+                
                 if 'p1a' in player:
                     self.battle_state.state['playerFirst'] = True
                     self.log("Player moved first (won speed tie or faster)", "BATTLE_STATE")
@@ -88,14 +119,16 @@ class BattleParser:
                     self.battle_state.state['playerFirst'] = False
                     self.log("Enemy moved first (won speed tie or faster)", "BATTLE_STATE")
             
-            # Track moves used by each Pokemon
+            # Track moves used by each Pokemon and set current turn move
             if 'p1a' in player and move != "unknown":
+                self.battle_state.state['playerMoveUsed'] = move
                 move_slot = self.battle_state.add_player_move(move)
                 if move_slot >= 0:
                     self.log(f"Player used {move} (slot {move_slot + 1}, PP remaining: {self.battle_state.player_pokemon['movesPP'][move_slot]})", "BATTLE_STATE")
                 else:
                     self.log(f"Player used {move} (move not in database or no moveslot available)", "BATTLE_STATE")
             elif 'p2a' in player and move != "unknown":
+                self.battle_state.state['enemyMoveUsed'] = move
                 move_slot = self.battle_state.add_enemy_move(move)
                 if move_slot >= 0:
                     self.log(f"Enemy used {move} (slot {move_slot + 1}, PP remaining: {self.battle_state.enemy_pokemon['movesPP'][move_slot]})", "BATTLE_STATE")
@@ -164,9 +197,17 @@ class BattleParser:
         # Only calculate damage if we have server-queried max HP
         if self.battle_state.player_real_max_hp > 0:
             if max_hp == 100:  # Percentage display
-                actual_damage = int((damage_display / 100.0) * self.battle_state.player_real_max_hp)
+                if current_hp == 0 and hasattr(self.battle_state, 'player_prev_hp_display'):
+                    # Player fainted - damage is exactly the remaining HP
+                    actual_damage = int((self.battle_state.player_prev_hp_display / 100.0) * self.battle_state.player_real_max_hp)
+                else:
+                    actual_damage = int((damage_display / 100.0) * self.battle_state.player_real_max_hp)
             else:  # Real HP display
-                actual_damage = damage_display
+                if current_hp == 0 and hasattr(self.battle_state, 'player_prev_hp_display'):
+                    # Player fainted - damage is exactly the remaining HP
+                    actual_damage = self.battle_state.player_prev_hp_display
+                else:
+                    actual_damage = damage_display
                 self.battle_state.player_real_max_hp = max_hp
             
             if actual_damage > 0:
@@ -175,7 +216,10 @@ class BattleParser:
                     self.log(f"Player hit itself in confusion for {actual_damage} damage ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
                 else:
                     self.battle_state.state['enemyDamage'] = actual_damage
-                    self.log(f"Enemy dealt {actual_damage} damage to player ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
+                    if current_hp == 0:
+                        self.log(f"Enemy dealt {actual_damage} damage to player - PLAYER FAINTED!", "BATTLE_STATE")
+                    else:
+                        self.log(f"Enemy dealt {actual_damage} damage to player ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
         else:
             self.log(f"Player took {damage_display}% damage (awaiting server HP data)", "BATTLE_STATE")
             
@@ -195,20 +239,38 @@ class BattleParser:
         if self.battle_state.enemy_real_max_hp > 0:
             # We have real max HP from server query
             if max_hp == 100:  # Percentage display
-                actual_damage = int((damage_display / 100.0) * self.battle_state.enemy_real_max_hp)
+                if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
+                    # Enemy fainted - damage is exactly the remaining HP
+                    actual_damage = int((self.battle_state.enemy_prev_hp_display / 100.0) * self.battle_state.enemy_real_max_hp)
+                else:
+                    actual_damage = int((damage_display / 100.0) * self.battle_state.enemy_real_max_hp)
             else:  # Real HP display
-                actual_damage = damage_display
+                if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
+                    # Enemy fainted - damage is exactly the remaining HP
+                    actual_damage = self.battle_state.enemy_prev_hp_display
+                else:
+                    actual_damage = damage_display
                 self.battle_state.enemy_real_max_hp = max_hp
         elif max_hp > 100:
             # We have real HP values directly from the message
-            actual_damage = damage_display
+            if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
+                # Enemy fainted - damage is exactly the remaining HP
+                actual_damage = self.battle_state.enemy_prev_hp_display
+            else:
+                actual_damage = damage_display
             self.battle_state.enemy_real_max_hp = max_hp
         elif damage_display > 0:
             # We only have percentage but can estimate damage
-            # Assume standard level 100 HP (around 300-400 for most Pokemon)
-            estimated_max_hp = 323  # Common HP value for level 100
-            actual_damage = int((damage_display / 100.0) * estimated_max_hp)
-            self.log(f"Enemy took {damage_display}% damage (estimated {actual_damage} damage using assumed max HP)", "BATTLE_STATE")
+            if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
+                # Enemy fainted - use previous HP percentage with estimated max HP
+                estimated_max_hp = 323  # Common HP value for level 100
+                actual_damage = int((self.battle_state.enemy_prev_hp_display / 100.0) * estimated_max_hp)
+                self.log(f"Enemy fainted! Estimated {actual_damage} damage using assumed max HP", "BATTLE_STATE")
+            else:
+                # Assume standard level 100 HP (around 300-400 for most Pokemon)
+                estimated_max_hp = 323  # Common HP value for level 100
+                actual_damage = int((damage_display / 100.0) * estimated_max_hp)
+                self.log(f"Enemy took {damage_display}% damage (estimated {actual_damage} damage using assumed max HP)", "BATTLE_STATE")
         
         if actual_damage > 0:
             if is_confusion_damage:
@@ -216,7 +278,10 @@ class BattleParser:
                 self.log(f"Enemy hit itself in confusion for {actual_damage} damage ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
             else:
                 self.battle_state.state['playerDamage'] = actual_damage
-                self.log(f"Player dealt {actual_damage} damage to enemy ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
+                if current_hp == 0:
+                    self.log(f"Player dealt {actual_damage} damage to enemy - ENEMY FAINTED!", "BATTLE_STATE")
+                else:
+                    self.log(f"Player dealt {actual_damage} damage to enemy ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
         elif damage_display > 0:
             self.log(f"Enemy took {damage_display}% damage (awaiting server HP data)", "BATTLE_STATE")
             
@@ -303,31 +368,62 @@ class BattleParser:
                 
     def _parse_stat_change(self, line):
         """Parse stat change messages"""
-        parts = line.split('|')
-        if len(parts) >= 5:
-            target = parts[2]
-            stat = parts[3]
-            stages = int(parts[4])
-            
-            if 'p2a' in target:
-                self.battle_state.state['playerStatDownEffect'] = True
-                self.log(f"Player's move lowered enemy's {stat} by {stages} stage(s)!", "BATTLE_STATE")
-            elif 'p1a' in target:
-                self.battle_state.state['enemyStatDownEffect'] = True
-                self.log(f"Enemy's move lowered player's {stat} by {stages} stage(s)!", "BATTLE_STATE")
+        if '|-unboost|' in line:
+            parts = line.split('|')
+            if len(parts) >= 5:
+                target = parts[2]
+                stat = parts[3]
+                stages = int(parts[4])
+                
+                if 'p2a' in target:
+                    # Enemy's stat was lowered
+                    self.battle_state.state['playerStatDownEffect'] = True
+                    self.log(f"Player's move lowered enemy's {stat} by {stages} stage(s)! [FLAG SET]", "BATTLE_STATE")
+                elif 'p1a' in target:
+                    # Player's stat was lowered
+                    self.battle_state.state['enemyStatDownEffect'] = True
+                    self.log(f"Enemy's move lowered player's {stat} by {stages} stage(s)! [FLAG SET]", "BATTLE_STATE")
+        
+        # Also check for stat increases (|-boost|)
+        elif '|-boost|' in line:
+            parts = line.split('|')
+            if len(parts) >= 5:
+                target = parts[2]
+                stat = parts[3]
+                stages = int(parts[4])
+                
+                # Log stat boosts but don't set stat down flags
+                if 'p1a' in target:
+                    self.log(f"Player's {stat} rose by {stages} stage(s)!", "BATTLE_STATE")
+                elif 'p2a' in target:
+                    self.log(f"Enemy's {stat} rose by {stages} stage(s)!", "BATTLE_STATE")
                 
     def _parse_turn(self, line):
         """Parse turn messages"""
         turn_num = line.split('|')[2] if len(line.split('|')) > 2 else "?"
         self.log(f"=== TURN {turn_num} ===", "BATTLE_STATE")
+        
+        # Log current battle state BEFORE starting new turn
+        if hasattr(self.battle_state, 'turn_moves') and len(self.battle_state.turn_moves) > 0:
+            self.log("=== PREVIOUS TURN SUMMARY ===", "BATTLE_STATE")
+            self.log(f"Player used: {self.battle_state.state.get('playerMoveUsed', 'None')}", "BATTLE_STATE")
+            self.log(f"Enemy used: {self.battle_state.state.get('enemyMoveUsed', 'None')}", "BATTLE_STATE")
+            self.log(f"Player dealt {self.battle_state.state['playerDamage']} damage", "BATTLE_STATE")
+            self.log(f"Enemy dealt {self.battle_state.state['enemyDamage']} damage", "BATTLE_STATE")
+            self.log(f"Player stat down effect: {self.battle_state.state['playerStatDownEffect']}", "BATTLE_STATE")
+            self.log(f"Enemy stat down effect: {self.battle_state.state['enemyStatDownEffect']}", "BATTLE_STATE")
+            if self.battle_state.state['playerFainted']:
+                self.log("Player Pokemon fainted this turn!", "BATTLE_STATE")
+            if self.battle_state.state['enemyFainted']:
+                self.log("Enemy Pokemon fainted this turn!", "BATTLE_STATE")
+        
         self.battle_state.current_turn = turn_num
         
-        # Reset battle state for the new turn
-        if hasattr(self.battle_state, 'turn_moves') and len(self.battle_state.turn_moves) > 0:
-            self.battle_state.reset_turn_variables()
+        # Initialize turn_moves for the new turn (values will be reset when first move is parsed)
+        self.battle_state.turn_moves = []
         
         # Clear wakeup flags after they've been logged for one full turn
-        if self.battle_state.clear_wakeup_flags_next_turn:
+        if hasattr(self.battle_state, 'clear_wakeup_flags_next_turn') and self.battle_state.clear_wakeup_flags_next_turn:
             self.battle_state.state['playerWokeUp'] = False
             self.battle_state.state['enemyWokeUp'] = False
             self.battle_state.state['playerSnappedOut'] = False
@@ -459,3 +555,16 @@ class BattleParser:
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             # If JSON parsing fails, continue with normal processing
             pass
+            
+    def _parse_faint(self, line):
+        """Parse faint messages"""
+        parts = line.split('|')
+        if len(parts) >= 3:
+            pokemon = parts[2]
+            
+            if 'p1a' in pokemon:
+                self.battle_state.state['playerFainted'] = True
+                self.log("Player Pokemon fainted!", "BATTLE_STATE")
+            elif 'p2a' in pokemon:
+                self.battle_state.state['enemyFainted'] = True
+                self.log("Enemy Pokemon fainted!", "BATTLE_STATE")
