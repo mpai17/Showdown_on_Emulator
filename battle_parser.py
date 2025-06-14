@@ -71,6 +71,10 @@ class BattleParser:
             elif '|faint|' in line:
                 self._parse_faint(line)
                 
+            # Heal detection for HP updates
+            elif '|-heal|' in line:
+                self._parse_heal(line)
+                
         except Exception as e:
             self.log(f"Error parsing battle data: {str(e)}", "ERROR")
             
@@ -171,22 +175,78 @@ class BattleParser:
             # Check if damage is from confusion
             is_confusion_damage = '[from] confusion' in line or 'confusion' in line.lower()
             
-            if '/' in damage_info:
+            # Handle faint format: "0 fnt"
+            if 'fnt' in damage_info:
+                current_hp = 0
+                # Use previous HP as max HP for calculation purposes
+                if 'p1a' in target:
+                    max_hp = 100  # Will be handled in damage calculation
+                    self._handle_player_damage(current_hp, max_hp, is_confusion_damage, is_faint=True)
+                elif 'p2a' in target:
+                    max_hp = 100  # Will be handled in damage calculation  
+                    self._handle_enemy_damage(current_hp, max_hp, is_confusion_damage, is_faint=True)
+            elif '/' in damage_info:
                 try:
                     current_hp_str, max_hp_str = damage_info.split('/')
                     current_hp = int(current_hp_str.strip())
                     max_hp = int(max_hp_str.split()[0].strip())
                     
                     if 'p1a' in target:
-                        self._handle_player_damage(current_hp, max_hp, is_confusion_damage)
+                        self._handle_player_damage(current_hp, max_hp, is_confusion_damage, is_faint=False)
                     elif 'p2a' in target:
-                        self._handle_enemy_damage(current_hp, max_hp, is_confusion_damage)
+                        self._handle_enemy_damage(current_hp, max_hp, is_confusion_damage, is_faint=False)
                         
                 except ValueError:
                     pass
                     
-    def _handle_player_damage(self, current_hp, max_hp, is_confusion_damage):
+    def _handle_player_damage(self, current_hp, max_hp, is_confusion_damage, is_faint=False):
         """Handle damage dealt to player"""
+        if is_faint:
+            # For faint scenarios, damage is exactly the previous HP
+            actual_damage = 0
+            
+            # Priority 1: Use the exact HP tracking current value if available
+            if (hasattr(self.battle_state, 'player_exact_hp') and 
+                self.battle_state.player_exact_hp["current"] > 0 and
+                self.battle_state.player_exact_hp["current"] != self.battle_state.player_exact_hp["max"]):
+                actual_damage = self.battle_state.player_exact_hp["current"]
+                self.log(f"Using exact HP tracking: {actual_damage}", "BATTLE_STATE")
+            
+            # Priority 2: Use previous display HP converted to real HP
+            elif (hasattr(self.battle_state, 'player_prev_hp_display') and 
+                  self.battle_state.player_prev_hp_display > 0 and
+                  self.battle_state.player_real_max_hp > 0):
+                if self.battle_state.player_prev_hp_display <= 100:
+                    # Convert percentage to actual HP
+                    actual_damage = int((self.battle_state.player_prev_hp_display / 100.0) * self.battle_state.player_real_max_hp)
+                    self.log(f"Using percentage conversion: {self.battle_state.player_prev_hp_display}% of {self.battle_state.player_real_max_hp} = {actual_damage}", "BATTLE_STATE")
+                else:
+                    # Already real HP
+                    actual_damage = self.battle_state.player_prev_hp_display
+                    self.log(f"Using real HP directly: {actual_damage}", "BATTLE_STATE")
+            
+            # Priority 3: Use Pokemon data structure current HP
+            elif self.battle_state.player_pokemon["currentHP"] > 0:
+                actual_damage = self.battle_state.player_pokemon["currentHP"]
+                self.log(f"Using Pokemon data current HP: {actual_damage}", "BATTLE_STATE")
+            
+            if actual_damage > 0:
+                if not is_confusion_damage:
+                    self.battle_state.state['enemyDamage'] = actual_damage
+                    self.log(f"Enemy dealt {actual_damage} damage to player - PLAYER FAINTED!", "BATTLE_STATE")
+                else:
+                    self.battle_state.state['playerHitConfuse'] = True
+                    self.log(f"Player hit itself in confusion for {actual_damage} damage - PLAYER FAINTED!", "BATTLE_STATE")
+            
+            # Update Pokemon HP
+            self.battle_state.player_pokemon["currentHP"] = 0
+            self.battle_state.player_prev_hp_display = 0
+            # Reset exact HP tracking
+            if hasattr(self.battle_state, 'player_exact_hp'):
+                self.battle_state.player_exact_hp["current"] = 0
+            return
+        
+        # Normal damage handling (non-faint)
         damage_display = self.battle_state.player_prev_hp_display - current_hp if hasattr(self.battle_state, 'player_prev_hp_display') else 0
         
         # Update Pokemon HP in data structure
@@ -194,20 +254,26 @@ class BattleParser:
         if max_hp > 100:
             self.battle_state.player_pokemon["maxHP"] = max_hp
         
+        # Update exact HP tracking if we have real HP values
+        if max_hp > 100:
+            # Real HP display - update exact HP tracking
+            if hasattr(self.battle_state, 'player_exact_hp'):
+                self.battle_state.player_exact_hp["current"] = current_hp
+                self.battle_state.player_exact_hp["max"] = max_hp
+            self.battle_state.player_real_max_hp = max_hp
+        elif self.battle_state.player_real_max_hp > 0:
+            # Percentage display - calculate and update exact HP
+            if hasattr(self.battle_state, 'player_exact_hp'):
+                exact_current = int((current_hp / 100.0) * self.battle_state.player_real_max_hp)
+                self.battle_state.player_exact_hp["current"] = exact_current
+                self.battle_state.player_exact_hp["max"] = self.battle_state.player_real_max_hp
+        
         # Only calculate damage if we have server-queried max HP
         if self.battle_state.player_real_max_hp > 0:
             if max_hp == 100:  # Percentage display
-                if current_hp == 0 and hasattr(self.battle_state, 'player_prev_hp_display'):
-                    # Player fainted - damage is exactly the remaining HP
-                    actual_damage = int((self.battle_state.player_prev_hp_display / 100.0) * self.battle_state.player_real_max_hp)
-                else:
-                    actual_damage = int((damage_display / 100.0) * self.battle_state.player_real_max_hp)
+                actual_damage = int((damage_display / 100.0) * self.battle_state.player_real_max_hp)
             else:  # Real HP display
-                if current_hp == 0 and hasattr(self.battle_state, 'player_prev_hp_display'):
-                    # Player fainted - damage is exactly the remaining HP
-                    actual_damage = self.battle_state.player_prev_hp_display
-                else:
-                    actual_damage = damage_display
+                actual_damage = damage_display
                 self.battle_state.player_real_max_hp = max_hp
             
             if actual_damage > 0:
@@ -216,74 +282,51 @@ class BattleParser:
                     self.log(f"Player hit itself in confusion for {actual_damage} damage ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
                 else:
                     self.battle_state.state['enemyDamage'] = actual_damage
-                    if current_hp == 0:
-                        self.log(f"Enemy dealt {actual_damage} damage to player - PLAYER FAINTED!", "BATTLE_STATE")
-                    else:
-                        self.log(f"Enemy dealt {actual_damage} damage to player ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
+                    self.log(f"Enemy dealt {actual_damage} damage to player ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
         else:
             self.log(f"Player took {damage_display}% damage (awaiting server HP data)", "BATTLE_STATE")
             
         self.battle_state.player_prev_hp_display = current_hp
         
-    def _handle_enemy_damage(self, current_hp, max_hp, is_confusion_damage):
+    def _handle_enemy_damage(self, current_hp, max_hp, is_confusion_damage, is_faint=False):
         """Handle damage dealt to enemy"""
-        damage_display = self.battle_state.enemy_prev_hp_display - current_hp if hasattr(self.battle_state, 'enemy_prev_hp_display') else 0
-        
-        # Update Pokemon HP in data structure
-        self.battle_state.enemy_pokemon["currentHP"] = current_hp
-        if max_hp > 100:
-            self.battle_state.enemy_pokemon["maxHP"] = max_hp
-        
-        # Calculate damage based on available HP data
-        actual_damage = 0
-        if self.battle_state.enemy_real_max_hp > 0:
-            # We have real max HP from server query
-            if max_hp == 100:  # Percentage display
-                if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
-                    # Enemy fainted - damage is exactly the remaining HP
-                    actual_damage = int((self.battle_state.enemy_prev_hp_display / 100.0) * self.battle_state.enemy_real_max_hp)
-                else:
-                    actual_damage = int((damage_display / 100.0) * self.battle_state.enemy_real_max_hp)
-            else:  # Real HP display
-                if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
-                    # Enemy fainted - damage is exactly the remaining HP
-                    actual_damage = self.battle_state.enemy_prev_hp_display
-                else:
-                    actual_damage = damage_display
-                self.battle_state.enemy_real_max_hp = max_hp
-        elif max_hp > 100:
-            # We have real HP values directly from the message
-            if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
-                # Enemy fainted - damage is exactly the remaining HP
+        if is_faint:
+            # For faint scenarios, damage is exactly the previous HP
+            actual_damage = 0
+            
+            # Use simplified 100 HP system - just use the previous percentage HP
+            if hasattr(self.battle_state, 'enemy_prev_hp_display') and self.battle_state.enemy_prev_hp_display > 0:
                 actual_damage = self.battle_state.enemy_prev_hp_display
-            else:
-                actual_damage = damage_display
-            self.battle_state.enemy_real_max_hp = max_hp
-        elif damage_display > 0:
-            # We only have percentage but can estimate damage
-            if current_hp == 0 and hasattr(self.battle_state, 'enemy_prev_hp_display'):
-                # Enemy fainted - use previous HP percentage with estimated max HP
-                estimated_max_hp = 323  # Common HP value for level 100
-                actual_damage = int((self.battle_state.enemy_prev_hp_display / 100.0) * estimated_max_hp)
-                self.log(f"Enemy fainted! Estimated {actual_damage} damage using assumed max HP", "BATTLE_STATE")
-            else:
-                # Assume standard level 100 HP (around 300-400 for most Pokemon)
-                estimated_max_hp = 323  # Common HP value for level 100
-                actual_damage = int((damage_display / 100.0) * estimated_max_hp)
-                self.log(f"Enemy took {damage_display}% damage (estimated {actual_damage} damage using assumed max HP)", "BATTLE_STATE")
-        
-        if actual_damage > 0:
-            if is_confusion_damage:
-                self.battle_state.state['enemyHitConfuse'] = True
-                self.log(f"Enemy hit itself in confusion for {actual_damage} damage ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
-            else:
-                self.battle_state.state['playerDamage'] = actual_damage
-                if current_hp == 0:
+                self.log(f"Using simplified HP system: {actual_damage}", "BATTLE_STATE")
+            
+            if actual_damage > 0:
+                if not is_confusion_damage:
+                    self.battle_state.state['playerDamage'] = actual_damage
                     self.log(f"Player dealt {actual_damage} damage to enemy - ENEMY FAINTED!", "BATTLE_STATE")
                 else:
-                    self.log(f"Player dealt {actual_damage} damage to enemy ({current_hp}/{max_hp} remaining)", "BATTLE_STATE")
-        elif damage_display > 0:
-            self.log(f"Enemy took {damage_display}% damage (awaiting server HP data)", "BATTLE_STATE")
+                    self.battle_state.state['enemyHitConfuse'] = True
+                    self.log(f"Enemy hit itself in confusion for {actual_damage} damage - ENEMY FAINTED!", "BATTLE_STATE")
+            
+            # Update Pokemon HP
+            self.battle_state.enemy_pokemon["currentHP"] = 0
+            self.battle_state.enemy_prev_hp_display = 0
+            return
+        
+        # Normal damage handling (non-faint) - use simplified 100 HP system
+        damage_display = self.battle_state.enemy_prev_hp_display - current_hp if hasattr(self.battle_state, 'enemy_prev_hp_display') else 0
+        
+        # Update Pokemon HP in data structure using percentage values
+        self.battle_state.enemy_pokemon["currentHP"] = current_hp
+        self.battle_state.enemy_pokemon["maxHP"] = 100  # Always use 100 for simplicity
+        
+        # For enemy, always use the percentage damage as actual damage (simplified system)
+        if damage_display > 0:
+            if is_confusion_damage:
+                self.battle_state.state['enemyHitConfuse'] = True
+                self.log(f"Enemy hit itself in confusion for {damage_display} damage ({current_hp}/100 remaining)", "BATTLE_STATE")
+            else:
+                self.battle_state.state['playerDamage'] = damage_display
+                self.log(f"Player dealt {damage_display} damage to enemy ({current_hp}/100 remaining)", "BATTLE_STATE")
             
         self.battle_state.enemy_prev_hp_display = current_hp
         
@@ -308,12 +351,52 @@ class BattleParser:
             target = parts[2]
             status = parts[3]
             
+            # Initialize turn_moves if not already done
+            if not hasattr(self.battle_state, 'turn_moves'):
+                self.battle_state.turn_moves = []
+            
+            # If this is the first action of the turn, reset battle state values and determine turn order
+            if len(self.battle_state.turn_moves) == 0:
+                # Reset all turn-specific battle state values at start of new turn
+                self.battle_state.state['playerCrit'] = 0
+                self.battle_state.state['playerMoveMiss'] = 0
+                self.battle_state.state['playerFullyParalyzed'] = False
+                self.battle_state.state['playerHitConfuse'] = False
+                self.battle_state.state['playerStatused'] = False
+                self.battle_state.state['playerDamage'] = 0
+                self.battle_state.state['playerStatDownEffect'] = False
+                self.battle_state.state['playerMoveUsed'] = ""
+                self.battle_state.state['playerFainted'] = False
+                
+                self.battle_state.state['enemyCrit'] = 0
+                self.battle_state.state['enemyMoveMiss'] = 0
+                self.battle_state.state['enemyFullyParalyzed'] = False
+                self.battle_state.state['enemyHitConfuse'] = False
+                self.battle_state.state['enemyStatused'] = False
+                self.battle_state.state['enemyDamage'] = 0
+                self.battle_state.state['enemyStatDownEffect'] = False
+                self.battle_state.state['enemyMoveUsed'] = ""
+                self.battle_state.state['enemyFainted'] = False
+                
+                self.battle_state.state['flinched'] = False
+                
+                # Track who acted first (status recovery counts as an action)
+                if 'p1a' in target:
+                    self.battle_state.state['playerFirst'] = True
+                    self.log("Player acted first (status recovery)", "BATTLE_STATE")
+                elif 'p2a' in target:
+                    self.battle_state.state['playerFirst'] = False
+                    self.log("Enemy acted first (status recovery)", "BATTLE_STATE")
+            
+            # Track this as a turn action
+            self.battle_state.turn_moves.append(target)
+            
             if 'p1a' in target and status == 'slp':
                 self.battle_state.state['playerWokeUp'] = True
-                self.log("Player woke up from sleep [FLAG SET]", "BATTLE_STATE")
+                self.log("Player woke up from sleep", "BATTLE_STATE")
             elif 'p2a' in target and status == 'slp':
                 self.battle_state.state['enemyWokeUp'] = True
-                self.log("Enemy woke up from sleep [FLAG SET]", "BATTLE_STATE")
+                self.log("Enemy woke up from sleep", "BATTLE_STATE")
                 
     def _parse_cant_move(self, line):
         """Parse can't move messages (paralysis, sleep, etc.)"""
@@ -322,6 +405,46 @@ class BattleParser:
             pokemon = parts[2]
             reason = parts[3]
             
+            # Initialize turn_moves if not already done
+            if not hasattr(self.battle_state, 'turn_moves'):
+                self.battle_state.turn_moves = []
+            
+            # If this is the first "can't move" of the turn, reset battle state values
+            if len(self.battle_state.turn_moves) == 0:
+                # Reset all turn-specific battle state values at start of new turn
+                self.battle_state.state['playerCrit'] = 0
+                self.battle_state.state['playerMoveMiss'] = 0
+                self.battle_state.state['playerFullyParalyzed'] = False
+                self.battle_state.state['playerHitConfuse'] = False
+                self.battle_state.state['playerStatused'] = False
+                self.battle_state.state['playerDamage'] = 0
+                self.battle_state.state['playerStatDownEffect'] = False
+                self.battle_state.state['playerMoveUsed'] = ""
+                self.battle_state.state['playerFainted'] = False
+                
+                self.battle_state.state['enemyCrit'] = 0
+                self.battle_state.state['enemyMoveMiss'] = 0
+                self.battle_state.state['enemyFullyParalyzed'] = False
+                self.battle_state.state['enemyHitConfuse'] = False
+                self.battle_state.state['enemyStatused'] = False
+                self.battle_state.state['enemyDamage'] = 0
+                self.battle_state.state['enemyStatDownEffect'] = False
+                self.battle_state.state['enemyMoveUsed'] = ""
+                self.battle_state.state['enemyFainted'] = False
+                
+                self.battle_state.state['flinched'] = False
+            
+            # Track who would have moved first (even if they can't move)
+            self.battle_state.turn_moves.append(pokemon)
+            if len(self.battle_state.turn_moves) == 1:
+                if 'p1a' in pokemon:
+                    self.battle_state.state['playerFirst'] = True
+                    self.log("Player would have moved first (but can't move)", "BATTLE_STATE")
+                elif 'p2a' in pokemon:
+                    self.battle_state.state['playerFirst'] = False
+                    self.log("Enemy would have moved first (but can't move)", "BATTLE_STATE")
+            
+            # Set the specific paralysis/sleep flags
             if reason == 'par':
                 if 'p1a' in pokemon:
                     self.battle_state.state['playerFullyParalyzed'] = True
@@ -329,6 +452,11 @@ class BattleParser:
                 elif 'p2a' in pokemon:
                     self.battle_state.state['enemyFullyParalyzed'] = True
                     self.log("Enemy is fully paralyzed!", "BATTLE_STATE")
+            elif reason == 'slp':
+                if 'p1a' in pokemon:
+                    self.log("Player is asleep and can't move!", "BATTLE_STATE")
+                elif 'p2a' in pokemon:
+                    self.log("Enemy is asleep and can't move!", "BATTLE_STATE")
                     
     def _parse_confusion_activate(self, line):
         """Parse confusion activation messages"""
@@ -568,3 +696,47 @@ class BattleParser:
             elif 'p2a' in pokemon:
                 self.battle_state.state['enemyFainted'] = True
                 self.log("Enemy Pokemon fainted!", "BATTLE_STATE")
+                
+    def _parse_heal(self, line):
+        """Parse heal messages to update HP tracking"""
+        parts = line.split('|')
+        if len(parts) >= 4:
+            target = parts[2]
+            hp_info = parts[3]
+            
+            if '/' in hp_info:
+                try:
+                    current_hp_str, max_hp_str = hp_info.split('/')
+                    current_hp = int(current_hp_str.strip())
+                    max_hp = int(max_hp_str.split()[0].strip())
+                    
+                    if 'p1a' in target:
+                        # Update player HP tracking after heal
+                        self.battle_state.player_prev_hp_display = current_hp
+                        self.battle_state.player_pokemon["currentHP"] = current_hp
+                        
+                        if max_hp > 100:
+                            # Real HP values
+                            if hasattr(self.battle_state, 'player_exact_hp'):
+                                self.battle_state.player_exact_hp["current"] = current_hp
+                                self.battle_state.player_exact_hp["max"] = max_hp
+                            self.battle_state.player_real_max_hp = max_hp
+                            self.log(f"Player healed to {current_hp}/{max_hp} HP [EXACT]", "BATTLE_STATE")
+                        else:
+                            # Percentage display - update exact HP if we have real max
+                            if hasattr(self.battle_state, 'player_exact_hp') and self.battle_state.player_real_max_hp > 0:
+                                exact_current = int((current_hp / 100.0) * self.battle_state.player_real_max_hp)
+                                self.battle_state.player_exact_hp["current"] = exact_current
+                                self.log(f"Player healed to {current_hp}% HP (exact: {exact_current}/{self.battle_state.player_real_max_hp})", "BATTLE_STATE")
+                            else:
+                                self.log(f"Player healed to {current_hp}% HP", "BATTLE_STATE")
+                        
+                    elif 'p2a' in target:
+                        # Update enemy HP tracking after heal (using simplified 100 HP system)
+                        self.battle_state.enemy_prev_hp_display = current_hp
+                        self.battle_state.enemy_pokemon["currentHP"] = current_hp
+                        self.battle_state.enemy_pokemon["maxHP"] = 100  # Always use 100 for enemy
+                        self.log(f"Enemy healed to {current_hp}/100 HP", "BATTLE_STATE")
+                        
+                except ValueError:
+                    pass

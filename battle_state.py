@@ -82,6 +82,17 @@ class BattleState:
         self.SPECIES_DATA = {}
         for species_id, name in self.SPECIES_NAMES.items():
             self.SPECIES_DATA[name] = species_id
+        
+        # Move name mapping for Showdown vs Gen 1 differences
+        self.MOVE_NAME_MAPPING = {
+            "Soft-Boiled": "Softboiled",
+            "Hi Jump Kick": "HiJumpKick", 
+            "Double-Edge": "DoubleEdge",
+            "Sand-Attack": "SandAttack",
+            "Vice Grip": "ViceGrip",
+            "Thunder Punch": "ThunderPunch",
+            # Add more mappings as needed
+        }
             
         self.reset_all()
         
@@ -128,6 +139,10 @@ class BattleState:
         self.player_pokemon = self._create_empty_pokemon()
         self.enemy_pokemon = self._create_empty_pokemon()
         
+        # Move tracking registry for all Pokemon that have been seen (moves only)
+        self.player_move_registry = {}  # {pokemon_name: {"moves": [...], "movesPP": [...], "move_names": [...]}}
+        self.enemy_move_registry = {}   # {pokemon_name: {"moves": [...], "movesPP": [...], "move_names": [...]}}
+        
         # Turn tracking
         self.turn_moves = []
         self.current_turn = "0"
@@ -172,10 +187,26 @@ class BattleState:
         if max_hp is not None:
             self.enemy_pokemon["maxHP"] = max_hp
             
-        # Reset moves when new Pokemon switches in - always exactly 4 zeros
-        self.enemy_pokemon["moves"] = [0, 0, 0, 0]
-        self.enemy_pokemon["movesPP"] = [0, 0, 0, 0]
-        self.enemy_pokemon["move_names"] = ["", "", "", ""]
+        # Check if we've seen this Pokemon's moves before
+        if clean_name in self.enemy_move_registry:
+            # Restore move data from registry
+            move_data = self.enemy_move_registry[clean_name]
+            self.enemy_pokemon["moves"] = move_data["moves"].copy()
+            self.enemy_pokemon["movesPP"] = move_data["movesPP"].copy()
+            self.enemy_pokemon["move_names"] = move_data["move_names"].copy()
+            self.log(f"Restored {clean_name} moves from registry: {[name for name in move_data['move_names'] if name]}", "BATTLE_STATE")
+        else:
+            # New Pokemon - reset moves
+            self.enemy_pokemon["moves"] = [0, 0, 0, 0]
+            self.enemy_pokemon["movesPP"] = [0, 0, 0, 0]
+            self.enemy_pokemon["move_names"] = ["", "", "", ""]
+            # Register empty move data
+            self.enemy_move_registry[clean_name] = {
+                "moves": [0, 0, 0, 0],
+                "movesPP": [0, 0, 0, 0],
+                "move_names": ["", "", "", ""]
+            }
+            self.log(f"Registered new enemy Pokemon for move tracking: {clean_name}", "BATTLE_STATE")
         
     def update_player_pokemon(self, name, current_hp=None, max_hp=None, level=100):
         """Update player Pokemon data when it switches in"""
@@ -195,15 +226,34 @@ class BattleState:
         if max_hp is not None:
             self.player_pokemon["maxHP"] = max_hp
             
-        # Reset moves when new Pokemon switches in - always exactly 4 zeros
-        self.player_pokemon["moves"] = [0, 0, 0, 0]
-        self.player_pokemon["movesPP"] = [0, 0, 0, 0]
-        self.player_pokemon["move_names"] = ["", "", "", ""]
+        # Check if we've seen this Pokemon's moves before
+        if clean_name in self.player_move_registry:
+            # Restore move data from registry
+            move_data = self.player_move_registry[clean_name]
+            self.player_pokemon["moves"] = move_data["moves"].copy()
+            self.player_pokemon["movesPP"] = move_data["movesPP"].copy()
+            self.player_pokemon["move_names"] = move_data["move_names"].copy()
+            self.log(f"Restored {clean_name} moves from registry: {[name for name in move_data['move_names'] if name]}", "BATTLE_STATE")
+        else:
+            # New Pokemon - reset moves
+            self.player_pokemon["moves"] = [0, 0, 0, 0]
+            self.player_pokemon["movesPP"] = [0, 0, 0, 0]
+            self.player_pokemon["move_names"] = ["", "", "", ""]
+            # Register empty move data
+            self.player_move_registry[clean_name] = {
+                "moves": [0, 0, 0, 0],
+                "movesPP": [0, 0, 0, 0],
+                "move_names": ["", "", "", ""]
+            }
+            self.log(f"Registered new player Pokemon for move tracking: {clean_name}", "BATTLE_STATE")
         
     def add_enemy_move(self, move_name):
         """Add a move to enemy Pokemon's moveset"""
-        if move_name in self.MOVE_DATA:
-            move_data = self.MOVE_DATA[move_name]
+        # Check for move name mapping (Showdown vs Gen 1 naming)
+        mapped_move_name = self.MOVE_NAME_MAPPING.get(move_name, move_name)
+        
+        if mapped_move_name in self.MOVE_DATA:
+            move_data = self.MOVE_DATA[mapped_move_name]
             move_id = move_data["id"]
             move_pp = int(move_data["pp"] * 1.6)  # Multiply by 1.6 for actual PP
             
@@ -213,6 +263,10 @@ class BattleState:
                     # Move already known, just decrement PP
                     if self.enemy_pokemon["movesPP"][i] > 0:
                         self.enemy_pokemon["movesPP"][i] -= 1
+                        # Update registry
+                        pokemon_name = self.enemy_pokemon["species_name"]
+                        if pokemon_name in self.enemy_move_registry:
+                            self.enemy_move_registry[pokemon_name]["movesPP"][i] = self.enemy_pokemon["movesPP"][i]
                     return i
             
             # Add new move to first empty slot
@@ -220,15 +274,25 @@ class BattleState:
                 if self.enemy_pokemon["moves"][i] == 0:
                     self.enemy_pokemon["moves"][i] = move_id
                     self.enemy_pokemon["movesPP"][i] = move_pp - 1  # Used one PP
-                    self.enemy_pokemon["move_names"][i] = move_name
+                    self.enemy_pokemon["move_names"][i] = mapped_move_name  # Store mapped name
+                    
+                    # Update registry
+                    pokemon_name = self.enemy_pokemon["species_name"]
+                    if pokemon_name in self.enemy_move_registry:
+                        self.enemy_move_registry[pokemon_name]["moves"][i] = move_id
+                        self.enemy_move_registry[pokemon_name]["movesPP"][i] = move_pp - 1
+                        self.enemy_move_registry[pokemon_name]["move_names"][i] = mapped_move_name
                     return i
                     
         return -1  # Move not found or no space
         
     def add_player_move(self, move_name):
         """Add a move to player Pokemon's moveset"""
-        if move_name in self.MOVE_DATA:
-            move_data = self.MOVE_DATA[move_name]
+        # Check for move name mapping (Showdown vs Gen 1 naming)
+        mapped_move_name = self.MOVE_NAME_MAPPING.get(move_name, move_name)
+        
+        if mapped_move_name in self.MOVE_DATA:
+            move_data = self.MOVE_DATA[mapped_move_name]
             move_id = move_data["id"]
             move_pp = int(move_data["pp"] * 1.6)  # Multiply by 1.6 for actual PP
             
@@ -238,6 +302,10 @@ class BattleState:
                     # Move already known, just decrement PP
                     if self.player_pokemon["movesPP"][i] > 0:
                         self.player_pokemon["movesPP"][i] -= 1
+                        # Update registry
+                        pokemon_name = self.player_pokemon["species_name"]
+                        if pokemon_name in self.player_move_registry:
+                            self.player_move_registry[pokemon_name]["movesPP"][i] = self.player_pokemon["movesPP"][i]
                     return i
             
             # Add new move to first empty slot
@@ -245,7 +313,14 @@ class BattleState:
                 if self.player_pokemon["moves"][i] == 0:
                     self.player_pokemon["moves"][i] = move_id
                     self.player_pokemon["movesPP"][i] = move_pp - 1  # Used one PP
-                    self.player_pokemon["move_names"][i] = move_name
+                    self.player_pokemon["move_names"][i] = mapped_move_name  # Store mapped name
+                    
+                    # Update registry
+                    pokemon_name = self.player_pokemon["species_name"]
+                    if pokemon_name in self.player_move_registry:
+                        self.player_move_registry[pokemon_name]["moves"][i] = move_id
+                        self.player_move_registry[pokemon_name]["movesPP"][i] = move_pp - 1
+                        self.player_move_registry[pokemon_name]["move_names"][i] = mapped_move_name
                     return i
                     
         return -1  # Move not found or no space
@@ -291,6 +366,8 @@ Hit by Confusion: {self.state['enemyHitConfuse']}
 Statused: {self.state['enemyStatused']} (inflicted status on player)
 Woke Up: {self.state['enemyWokeUp']}
 Snapped Out: {self.state['enemySnappedOut']}
-Fainted: {self.state['enemyFainted']}"""
+Fainted: {self.state['enemyFainted']}
+
+NOTE: Enemy damage values are in percent (simplified 100 HP system)"""
         
         return pokemon_info
